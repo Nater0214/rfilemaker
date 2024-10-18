@@ -1,6 +1,10 @@
-use std::{fs::{create_dir_all, File}, io::Write, path::Path};
+use std::path::Path;
 
 use clap::Parser;
+use job::Job;
+use tokio::{fs::{create_dir, try_exists}, task::{self, JoinHandle}};
+
+mod job;
 
 /// The args of the program
 #[derive(Parser, Debug)]
@@ -24,8 +28,11 @@ struct Args {
     #[arg(short = 'S', long, default_value_t = String::from('e'))]
     string: String,
 
+    #[arg(short, long, default_value_t = 1)]
+    jobs: u16,
+
     #[arg(long, default_value_t = String::from("256M"))]
-    max_memory: String,
+    write_size: String,
 }
 
 /// Constant containing the size of a kilobyte
@@ -54,7 +61,8 @@ fn parse_size(size: &String) -> u128 {
 }
 
 /// The main function
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get command line arguments
     let args = Args::parse();
@@ -63,46 +71,55 @@ fn main() {
     let size = parse_size(&args.size);
 
     // Parse the max memory
-    let max_memory = parse_size(&args.max_memory);
+    let write_size = parse_size(&args.write_size);
 
     // Panic if string is larger than max memory
-    if args.string.len() > max_memory as usize {
+    if args.string.len() > write_size as usize {
         panic!("String size is larger than max memory");
     }
-
-    // Create the write string
-    let mut write_string = args.string.repeat((max_memory / args.string.len() as u128) as usize);
-    write_string.truncate(max_memory as usize);
-
-    // Determine the amount of times to write the string
-    let write_amount = (size / max_memory) as u64;
-
-    // Create the remainder string
-    let mut remainder_string = args.string.repeat((size % max_memory) as usize);
-    remainder_string.truncate(size as usize);
 
     // Validate directory
     let dir = Path::new(&args.directory);
 
     // Create directory if it doesn't exist
-    if !dir.exists() {
-        create_dir_all(dir).unwrap();
+    if !try_exists(dir).await? {
+        create_dir(dir).await?;
     }
 
-    // Loop creating files
+    // Create handles vector
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+
+    // Loop making files
     for i in 1..=args.amount {
 
         // Get the file path
         let file_path = dir.join(format!("{}{}.{}", args.name, i, args.extension));
 
-        // Create the file
-        File::create(&file_path).unwrap();
+        // Create a job
+        let job = Job::new(
+            file_path.clone(),
+            args.string.clone(),
+            size,
+            write_size
+        );
 
-        // Write the string to the file
-        let mut file = File::options().write(true).open(&file_path).unwrap();
-        for _ in 0..write_amount {
-            file.write_all(write_string.as_bytes()).unwrap();
-        }
-        file.write_all(remainder_string.as_bytes()).unwrap();
+        // Run the job
+        let handle = task::spawn(async move {
+            let result = job.run().await;
+            match result {
+                Ok(_) => println!("Created file {}", file_path.display()),
+                Err(e) => println!("Error creating file {}: {}", file_path.display(), e),
+            }
+        });
+
+        // Add the handle to the handles vector
+        handles.push(handle);
     }
+
+    // Get a result from each handle
+    for handle in handles {
+        handle.await?;
+    }
+
+    Ok(())
 }

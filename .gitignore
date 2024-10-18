@@ -1,2 +1,8 @@
+# Editor config
+/.vscode
+
+# Build files
 /target
+
+# Output dir
 /files
